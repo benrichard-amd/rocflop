@@ -64,18 +64,20 @@ template<typename T> __global__ void fma_throughput(vec4<T>* buffer, int count)
     vec4<T> value0 = ptr[0 * grid_size + tid];
     vec4<T> value1 = ptr[1 * grid_size + tid];
     vec4<T> value2 = ptr[2 * grid_size + tid];
+    vec4<T> value3 = ptr[3 * grid_size + tid];
 
     for(int j = 0; j < count; j++) {
         for(int j = 0; j < 64; j++) {
 
-            // 12 MFA ops
+            // 16 MFA ops
             value0 = value0 * value0 + k;
             value1 = value1 * value1 + k;
             value2 = value2 * value2 + k;
+            value3 = value3 * value3 + k;
         }
     }
 
-    ptr[tid] = value0 + value1 + value2;
+    ptr[tid] = value0 + value1 + value2 + value3;
 }
 
 __global__ void matmul_fp16_throughput(vec4<float16>* inputs, vec4<float>* outputs, int count)
@@ -88,20 +90,23 @@ __global__ void matmul_fp16_throughput(vec4<float16>* inputs, vec4<float>* outpu
     vec4<float16> value0 = ptr[0 * grid_size + tid];
     vec4<float16> value1 = ptr[1 * grid_size + tid];
     vec4<float16> value2 = ptr[2 * grid_size + tid];
+    vec4<float16> value3 = ptr[2 * grid_size + tid];
 
     vec4<float> accum0;
     vec4<float> accum1;
     vec4<float> accum2;
+    vec4<float> accum3;
     for(int i = 0; i < count; i++) {
         for(int j = 0; j < 64; j++) {
-            // 3 MFMA ops
+            // 4 MFMA ops
             accum0 = __builtin_amdgcn_mfma_f32_16x16x16f16(value0, value0, accum0, 0, 0, 0);
             accum1 = __builtin_amdgcn_mfma_f32_16x16x16f16(value1, value1, accum1, 0, 0, 0);
             accum2 = __builtin_amdgcn_mfma_f32_16x16x16f16(value2, value2, accum2, 0, 0, 0);
+            accum3 = __builtin_amdgcn_mfma_f32_16x16x16f16(value3, value3, accum3, 0, 0, 0);
         }
     }
 
-    outputs[tid] = accum0 + accum1 + accum2;
+    outputs[tid] = accum0 + accum1 + accum2 + accum3;
 }
 
 
@@ -116,7 +121,7 @@ template<typename T> void fma_throughput_test(int count, int runs = 1)
     int threads_per_block = 64;
     int total_threads = blocks * threads_per_block;
 
-    HIP_CALL(hipMalloc(&buffer, sizeof(vec4<T>) * total_threads * 3));
+    HIP_CALL(hipMalloc(&buffer, sizeof(vec4<T>) * total_threads * 4));
 
     HIPTimer t;
     t.start();
@@ -127,7 +132,7 @@ template<typename T> void fma_throughput_test(int count, int runs = 1)
     HIP_CALL(hipDeviceSynchronize());
 
     double elapsed = t.elapsed();
-    double ops = (double)total_threads * count * 64 * 12 * runs;
+    double ops = (double)total_threads * count * 64 * 16 * runs;
     double tflops = (double)ops / 1e12 / elapsed;
     printf("%.2fT FMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * 2.0);
 
@@ -159,7 +164,7 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     int threads_per_block = wave_size;
     int total_threads = blocks * threads_per_block;
 
-    HIP_CALL(hipMalloc(&buffer, sizeof(matT) * m * k * total_threads * 3));
+    HIP_CALL(hipMalloc(&buffer, sizeof(matT) * m * k * total_threads * 4));
     HIP_CALL(hipMalloc(&accum, sizeof(accumT) * m * n * total_threads));
 
     HIPTimer t;
@@ -173,7 +178,7 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     HIP_CALL(hipDeviceSynchronize());
 
     double elapsed = t.elapsed();
-    double ops = (double)blocks * count * 64 * 3 * runs;
+    double ops = (double)blocks * count * 64 * 4 * runs;
     double tflops = (double)ops / 1e12 / elapsed;
     printf("%.2fT MFMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * matrix_ops);
 
@@ -216,7 +221,7 @@ int main(int argc, char** argv)
             fp64 = true;
         } else if(arg == "--fp16") {
             fp16 = true;
-        } else if(arg == "--matfp32") {
+        } else if(arg == "--matfp16") {
             matfp16 = true;
         } else {
             std::cout << "Invalid argument " << arg << std::endl;
