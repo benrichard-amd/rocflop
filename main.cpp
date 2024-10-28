@@ -15,6 +15,8 @@ void HIP_CALL(hipError_t err)
     }
 }
 
+
+// Timer for measuring kernel duration
 class HIPTimer {
 
 private:
@@ -47,10 +49,15 @@ public:
     }
 };
 
+// Vector types. Useful for packed math (where supported) and MFMA inputs.
 template<typename T, uint32_t Rank>
 using vecT = T __attribute__((ext_vector_type(Rank)));
 
 template<typename T> using vec4 = vecT<T, 4>;
+
+
+// Kernels
+
 
 template<typename T> __global__ void fma_throughput(vec4<T>* buffer, int count)
 {
@@ -69,7 +76,7 @@ template<typename T> __global__ void fma_throughput(vec4<T>* buffer, int count)
     for(int j = 0; j < count; j++) {
         for(int j = 0; j < 64; j++) {
 
-            // 16 MFA ops
+            // 16 FMA ops
             value0 = value0 * value0 + k;
             value1 = value1 * value1 + k;
             value2 = value2 * value2 + k;
@@ -108,6 +115,38 @@ __global__ void matmul_fp16_throughput(vec4<float16>* inputs, vec4<float>* outpu
 
     outputs[tid] = accum0 + accum1 + accum2 + accum3;
 }
+
+__global__ void matmul_fp32_throughput(float* inputs, vec4<float>* outputs, int count)
+{
+    int grid_size = gridDim.x * blockDim.x;
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
+
+    float* ptr = inputs;
+
+    float value0 = ptr[0 * grid_size + tid];
+    float value1 = ptr[1 * grid_size + tid];
+    float value2 = ptr[2 * grid_size + tid];
+    float value3 = ptr[2 * grid_size + tid];
+
+    vec4<float> accum0;
+    vec4<float> accum1;
+    vec4<float> accum2;
+    vec4<float> accum3;
+    for(int i = 0; i < count; i++) {
+        for(int j = 0; j < 64; j++) {
+            // 4 MFMA ops
+            accum0 = __builtin_amdgcn_mfma_f32_16x16x4f32(value0, value0, accum0, 0, 0, 0);
+            accum1 = __builtin_amdgcn_mfma_f32_16x16x4f32(value1, value1, accum1, 0, 0, 0);
+            accum2 = __builtin_amdgcn_mfma_f32_16x16x4f32(value2, value2, accum2, 0, 0, 0);
+            accum3 = __builtin_amdgcn_mfma_f32_16x16x4f32(value3, value3, accum3, 0, 0, 0);
+        }
+    }
+
+    outputs[tid] = accum0 + accum1 + accum2 + accum3;
+}
+
+
+// Host code
 
 
 template<typename T> void fma_throughput_test(int count, int runs = 1)
@@ -150,6 +189,10 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
         k = 16;
         m = 16;
         n = 16;
+    } else if(std::is_same<matT, float>::value) {
+        k = 4;
+        m = 16;
+        n = 16;
     }
     
     int matrix_ops = k * m * n * 2;
@@ -164,7 +207,7 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     int threads_per_block = wave_size;
     int total_threads = blocks * threads_per_block;
 
-    HIP_CALL(hipMalloc(&buffer, sizeof(matT) * m * k * total_threads * 4));
+    HIP_CALL(hipMalloc(&buffer,  4 * sizeof(matT) * m * k * total_threads));
     HIP_CALL(hipMalloc(&accum, sizeof(accumT) * m * n * total_threads));
 
     HIPTimer t;
@@ -172,6 +215,8 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     for(int i = 0; i < runs; i++) {
         if(std::is_same<matT, float16>::value && std::is_same<accumT, float>::value) {
             matmul_fp16_throughput<<<blocks, threads_per_block>>>((vec4<float16>*)buffer, (vec4<float>*)accum, count);
+        } else if(std::is_same<matT,float>::value && std::is_same<accumT, float>::value) {
+            matmul_fp32_throughput<<<blocks, threads_per_block>>>((float*)buffer, (vec4<float>*)accum, count);
         }
     }
     t.stop();
@@ -196,6 +241,7 @@ int main(int argc, char** argv)
     bool fp32 = false;
     bool fp64 = false;
     bool matfp16 = false;
+    bool matfp32 = false;
 
     int device = 0;
 
@@ -223,6 +269,8 @@ int main(int argc, char** argv)
             fp16 = true;
         } else if(arg == "--matfp16") {
             matfp16 = true;
+        } else if(arg == "--matfp32") {
+            matfp32 = true;
         } else {
             std::cout << "Invalid argument " << arg << std::endl;
             return 1;
@@ -231,28 +279,33 @@ int main(int argc, char** argv)
         i++;
     }
 
-    all |= !fp32 && !fp32 && !fp16 && !matfp16;
+    all |= !fp32 && !fp32 && !fp16 && !matfp16 && !matfp32;
 
     HIP_CALL(hipSetDevice(device));
 
     if(all || fp16) {
-        std::cout << "FP16:" << std::endl;
+        std::cout << "VALU FP16:" << std::endl;
         fma_throughput_test<float16>(4096, runs);
     }
 
     if(all || fp32) {
-        std::cout << "FP32:" << std::endl;
+        std::cout << "VALU FP32:" << std::endl;
         fma_throughput_test<float>(4096, runs);
     }
 
     if(all || fp64) {
-        std::cout << "FP64:" << std::endl;
-        fma_throughput_test<double>(4096);
+        std::cout << "VALU FP64:" << std::endl;
+        fma_throughput_test<double>(4096, runs);
     }
 
     if(all || matfp16) {
         std::cout << "MFMA FP16:" << std::endl;
-        matmul_throughput_test<float16, float>(1024);
+        matmul_throughput_test<float16, float>(4096, runs);
+    }
+    
+    if(all || matfp32) {
+        std::cout << "MFMA FP32:" << std::endl;
+        matmul_throughput_test<float, float>(4096, runs);
     }
 
     return 0;
