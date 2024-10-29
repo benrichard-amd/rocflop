@@ -186,16 +186,18 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     int n;
 
     if(std::is_same<matT, float16>::value) {
+        m = 16;
+        n = 16;
         k = 16;
-        m = 16;
-        n = 16;
     } else if(std::is_same<matT, float>::value) {
-        k = 4;
         m = 16;
         n = 16;
+        k = 4;
+    } else {
+        assert(false);
     }
     
-    int matrix_ops = k * m * n * 2;
+    int ops_per_matmul = k * m * n * 2;
 
     void* buffer = nullptr;
     void* accum = nullptr;
@@ -207,7 +209,7 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     int threads_per_block = wave_size;
     int total_threads = blocks * threads_per_block;
 
-    HIP_CALL(hipMalloc(&buffer,  4 * sizeof(matT) * m * k * total_threads));
+    HIP_CALL(hipMalloc(&buffer, 4 * sizeof(matT) * m * k * total_threads));
     HIP_CALL(hipMalloc(&accum, sizeof(accumT) * m * n * total_threads));
 
     HIPTimer t;
@@ -225,7 +227,7 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     double elapsed = t.elapsed();
     double ops = (double)blocks * count * 64 * 4 * runs;
     double tflops = (double)ops / 1e12 / elapsed;
-    printf("%.2fT MFMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * matrix_ops);
+    printf("%.2fT MFMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * ops_per_matmul);
 
     HIP_CALL(hipFree(buffer));
     HIP_CALL(hipFree(accum));
