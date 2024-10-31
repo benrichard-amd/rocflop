@@ -1,10 +1,12 @@
 #include <iostream>
+#include <cstring>
 #include<hip/hip_runtime.h>
 #include<hip/hip_fp16.h>
 #include<unistd.h>
 #include <type_traits>
 #include <vector>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 using float16 = _Float16;
 
@@ -15,7 +17,6 @@ void HIP_CALL(hipError_t err)
         exit(1);
     }
 }
-
 
 // Timer for measuring kernel duration
 class HIPTimer {
@@ -150,19 +151,19 @@ __global__ void matmul_fp32_throughput(float* inputs, vec4<float>* outputs, int 
 // Host code
 
 
-template<typename T> void fma_throughput_test(int count, int runs = 1)
+template<typename T> double fma_throughput_test(int count, int runs = 1)
 {
     vec4<T>* buffer = nullptr;
 
     hipDeviceProp_t props;
     HIP_CALL(hipGetDeviceProperties(&props, 0));
-
+    
     int blocks = props.multiProcessorCount * 512;
     int threads_per_block = 64;
     int total_threads = blocks * threads_per_block;
 
     HIP_CALL(hipMalloc(&buffer, sizeof(vec4<T>) * total_threads * 4));
-
+    
     HIPTimer t;
     t.start();
     for(int i = 0; i < runs; i++) {
@@ -173,13 +174,14 @@ template<typename T> void fma_throughput_test(int count, int runs = 1)
 
     double elapsed = t.elapsed();
     double ops = (double)total_threads * count * 64 * 16 * runs;
-    double tflops = (double)ops / 1e12 / elapsed;
-    printf("%.2fT FMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * 2.0);
+    double flops = (double)ops * 2.0 / elapsed;
 
     HIP_CALL(hipFree(buffer));
+
+    return flops;
 }
 
-template<typename matT, typename accumT> void matmul_throughput_test(int count, int runs = 1)
+template<typename matT, typename accumT> double matmul_throughput_test(int count, int runs = 1)
 {
     const int wave_size = 64;
     int k;
@@ -227,12 +229,14 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
 
     double elapsed = t.elapsed();
     double ops = (double)blocks * count * 64 * 4 * runs;
-    double tflops = (double)ops / 1e12 / elapsed;
-    printf("%.2fT MFMA ops/sec (%.2f TFLOPS)\n", tflops, tflops * ops_per_matmul);
+    double flops = (double)ops * ops_per_matmul / elapsed;
 
     HIP_CALL(hipFree(buffer));
     HIP_CALL(hipFree(accum));
+
+    return flops;
 }
+
 
 enum : uint32_t {
     VALU_FP32 = 1 << 0,
@@ -243,59 +247,127 @@ enum : uint32_t {
     ALL = (uint32_t)-1
 };
 
-void run_tests(int device, int runs, uint32_t mask)
-{
-    HIP_CALL(hipSetDevice(device));
+struct Result {
+    int device;
+    double valu_fp16;
+    double valu_fp32;
+    double valu_fp64;
+    double mfma_fp16;
+    double mfma_fp32;
 
-    if(mask == 0) {
-        mask = ALL;
+    bool operator<(const Result& other) {
+        return device < other.device;
     }
+};
+
+void print_result(const Result& res, uint32_t mask)
+{
+    std::cout << std::endl << "GPU " << res.device << std::endl;
 
     if(mask & VALU_FP16) {
-        std::cout << "VALU FP16:" << std::endl;
-        fma_throughput_test<float16>(4096, runs);
+        printf("VALU FP16: %.2f TFLOPS\n", res.valu_fp16 / 1e12);
+    }
+    if(mask & VALU_FP32) {
+        printf("VALU FP32: %.2f TFLOPS\n", res.valu_fp32 / 1e12);
+    }
+    if(mask & VALU_FP64) {
+        printf("VALU FP64: %.2f TFLOPS\n", res.valu_fp64 / 1e12);
+    }
+    if(mask & MFMA_FP16) {
+        printf("MFMA FP16: %.2f TFLOPS\n", res.mfma_fp16 / 1e12);
+    }
+    if(mask & MFMA_FP32) {
+        printf("MFMA FP32: %.2f TFLOPS\n", res.mfma_fp32 / 1e12);
+    }
+}
+
+Result run_tests(int device, int runs, uint32_t mask)
+{
+    int device_count;
+
+    HIP_CALL(hipGetDeviceCount(&device_count));
+
+    if(device >= device_count) {
+        std::cout << "Device " << device << " does not exist. Skipping..." << std::endl;
+        exit(1);
+    }
+
+    HIP_CALL(hipSetDevice(device));
+
+    Result res = {.device = device};
+
+    if(mask & VALU_FP16) {
+        res.valu_fp16 = fma_throughput_test<float16>(4096, runs);
     }
 
     if(mask & VALU_FP32) {
-        std::cout << "VALU FP32:" << std::endl;
-        fma_throughput_test<float>(4096, runs);
+        res.valu_fp32 = fma_throughput_test<float>(4096, runs);
     }
 
     if(mask & VALU_FP64) {
-        std::cout << "VALU FP64:" << std::endl;
-        fma_throughput_test<double>(4096, runs);
+        res.valu_fp64 = fma_throughput_test<double>(4096, runs);
     }
 
     if(mask & MFMA_FP16) {
-        std::cout << "MFMA FP16:" << std::endl;
-        matmul_throughput_test<float16, float>(4096, runs);
+        res.mfma_fp16 =matmul_throughput_test<float16, float>(4096, runs);
     }
     
     if(mask & MFMA_FP32) {
-        std::cout << "MFMA FP32:" << std::endl;
-        matmul_throughput_test<float, float>(4096, runs);
+        res.mfma_fp32 = matmul_throughput_test<float, float>(4096, runs);
     }
+
+    return res;
 }
 
 void run(std::vector<int>& devices, int runs, uint32_t mask)
 {
     std::vector<pid_t> pids;
+    std::vector<Result> results;
+
+    int fd[2];
+
+    if(pipe(fd)) {
+        std::cout << std::strerror(errno) << std::endl;
+        exit(1);
+    }
 
     // Start a new process for each GPU
     for(auto d : devices) {
         pid_t pid = fork();
 
         if(pid == 0) {
-            run_tests(d, runs, mask);
+            Result res = run_tests(d, runs, mask);
+
+            write(fd[1], &res, sizeof(res));
             return;
         }
         pids.push_back(pid);
     }
 
-    // Wait for processes to finish
+    // Wait for all processes to finish
     for(auto pid : pids) {
         int status;
         waitpid(pid, &status, 0);
+    }
+
+    // Set reads to non-blocking in case one or more child processes
+    // fails and does not write its results to the pipe
+    int flags = fcntl(fd[0], F_GETFL, 0);
+    fcntl(fd[0], F_SETFL, flags | O_NONBLOCK);
+
+    for(auto pid : pids) {
+        Result res;
+        if(read(fd[0], &res, sizeof(res)) > 0) {
+            results.push_back(res);
+        }
+    }
+
+    // Sort results by GPU id
+    std::sort(results.begin(), results.end());
+ 
+    // Print results
+    for(auto r : results) {
+        print_result(r, mask);
     }
 }
 
@@ -305,7 +377,6 @@ int main(int argc, char** argv)
 
     uint32_t mask = 0;
     std::vector<int> devices;
- 
     int device = 0;
 
     int i = 1;
@@ -350,6 +421,10 @@ int main(int argc, char** argv)
 
     if(devices.size() == 0) {
         devices.push_back(0);
+    }
+
+    if(mask == 0) {
+        mask = ALL;
     }
 
     run(devices, runs, mask);
