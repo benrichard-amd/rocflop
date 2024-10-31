@@ -1,9 +1,10 @@
 #include <iostream>
-
 #include<hip/hip_runtime.h>
 #include<hip/hip_fp16.h>
 #include<unistd.h>
 #include <type_traits>
+#include <vector>
+#include <sys/wait.h>
 
 using float16 = _Float16;
 
@@ -233,18 +234,78 @@ template<typename matT, typename accumT> void matmul_throughput_test(int count, 
     HIP_CALL(hipFree(accum));
 }
 
+enum : uint32_t {
+    VALU_FP32 = 1 << 0,
+    VALU_FP16 = 1 << 1,
+    VALU_FP64 = 1 << 2,
+    MFMA_FP16 = 1 << 3,
+    MFMA_FP32 = 1 << 4,
+    ALL = (uint32_t)-1
+};
+
+void run_tests(int device, int runs, uint32_t mask)
+{
+    HIP_CALL(hipSetDevice(device));
+
+    if(mask == 0) {
+        mask = ALL;
+    }
+
+    if(mask & VALU_FP16) {
+        std::cout << "VALU FP16:" << std::endl;
+        fma_throughput_test<float16>(4096, runs);
+    }
+
+    if(mask & VALU_FP32) {
+        std::cout << "VALU FP32:" << std::endl;
+        fma_throughput_test<float>(4096, runs);
+    }
+
+    if(mask & VALU_FP64) {
+        std::cout << "VALU FP64:" << std::endl;
+        fma_throughput_test<double>(4096, runs);
+    }
+
+    if(mask & MFMA_FP16) {
+        std::cout << "MFMA FP16:" << std::endl;
+        matmul_throughput_test<float16, float>(4096, runs);
+    }
+    
+    if(mask & MFMA_FP32) {
+        std::cout << "MFMA FP32:" << std::endl;
+        matmul_throughput_test<float, float>(4096, runs);
+    }
+}
+
+void run(std::vector<int>& devices, int runs, uint32_t mask)
+{
+    std::vector<pid_t> pids;
+
+    // Start a new process for each GPU
+    for(auto d : devices) {
+        pid_t pid = fork();
+
+        if(pid == 0) {
+            run_tests(d, runs, mask);
+            return;
+        }
+        pids.push_back(pid);
+    }
+
+    // Wait for processes to finish
+    for(auto pid : pids) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
 
 int main(int argc, char** argv)
 {
     int runs = 1;
 
-    bool all = false;
-    bool fp16 = false;
-    bool fp32 = false;
-    bool fp64 = false;
-    bool matfp16 = false;
-    bool matfp32 = false;
-
+    uint32_t mask = 0;
+    std::vector<int> devices;
+ 
     int device = 0;
 
     int i = 1;
@@ -252,8 +313,16 @@ int main(int argc, char** argv)
         std::string arg = std::string(argv[i]);
 
         if(arg == "--device") {
-            device = atoi(argv[i + 1]);
-
+            devices.push_back(atoi(argv[i + 1]));
+            // Skip next 
+            i++;
+        } else if(arg == "--devices") {
+            std::string s(argv[i + 1]);
+            std::stringstream ss(s);
+            std::string r;
+            while(getline(ss, r, ',')) {
+                devices.push_back(std::stoi(r));
+            }
             // Skip next 
             i++;
         } else if(arg == "--runs") {
@@ -261,18 +330,16 @@ int main(int argc, char** argv)
 
             // Skip next
             i++;
-        } else if(arg == "--all") {
-            all = true;
         } else if(arg == "--fp32") {
-            fp32 = true;
+            mask |= VALU_FP32;
         } else if(arg == "--fp64") {
-            fp64 = true;
+            mask |= VALU_FP64;
         } else if(arg == "--fp16") {
-            fp16 = true;
+            mask |= VALU_FP16;
         } else if(arg == "--matfp16") {
-            matfp16 = true;
+            mask |= MFMA_FP16;
         } else if(arg == "--matfp32") {
-            matfp32 = true;
+            mask |= MFMA_FP32;
         } else {
             std::cout << "Invalid argument " << arg << std::endl;
             return 1;
@@ -281,34 +348,11 @@ int main(int argc, char** argv)
         i++;
     }
 
-    all |= !fp32 && !fp32 && !fp16 && !matfp16 && !matfp32;
-
-    HIP_CALL(hipSetDevice(device));
-
-    if(all || fp16) {
-        std::cout << "VALU FP16:" << std::endl;
-        fma_throughput_test<float16>(4096, runs);
+    if(devices.size() == 0) {
+        devices.push_back(0);
     }
 
-    if(all || fp32) {
-        std::cout << "VALU FP32:" << std::endl;
-        fma_throughput_test<float>(4096, runs);
-    }
-
-    if(all || fp64) {
-        std::cout << "VALU FP64:" << std::endl;
-        fma_throughput_test<double>(4096, runs);
-    }
-
-    if(all || matfp16) {
-        std::cout << "MFMA FP16:" << std::endl;
-        matmul_throughput_test<float16, float>(4096, runs);
-    }
-    
-    if(all || matfp32) {
-        std::cout << "MFMA FP32:" << std::endl;
-        matmul_throughput_test<float, float>(4096, runs);
-    }
+    run(devices, runs, mask);
 
     return 0;
 }
