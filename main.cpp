@@ -1,14 +1,14 @@
 #include <iostream>
 #include <cstring>
-#include<hip/hip_runtime.h>
-#include<hip/hip_fp16.h>
-#include<unistd.h>
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <unistd.h>
 #include <type_traits>
 #include <vector>
 #include <sys/wait.h>
 #include <fcntl.h>
 
-using float16 = _Float16;
+#include "kernels.h"
 
 void HIP_CALL(hipError_t err)
 {
@@ -51,105 +51,7 @@ public:
     }
 };
 
-// Vector types. Useful for packed math (where supported) and MFMA inputs.
-template<typename T, uint32_t Rank>
-using vecT = T __attribute__((ext_vector_type(Rank)));
-
-template<typename T> using vec4 = vecT<T, 4>;
-
-
-// Kernels
-
-
-template<typename T> __global__ void fma_throughput(vec4<T>* buffer, int count)
-{
-    const T k = 1.0;
-
-    const int grid_size = gridDim.x * blockDim.x;
-    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-    vec4<T>* ptr = buffer;
-
-    vec4<T> value0 = ptr[0 * grid_size + tid];
-    vec4<T> value1 = ptr[1 * grid_size + tid];
-    vec4<T> value2 = ptr[2 * grid_size + tid];
-    vec4<T> value3 = ptr[3 * grid_size + tid];
-
-    for(int j = 0; j < count; j++) {
-        for(int j = 0; j < 64; j++) {
-
-            // 16 FMA ops
-            value0 = value0 * value0 + k;
-            value1 = value1 * value1 + k;
-            value2 = value2 * value2 + k;
-            value3 = value3 * value3 + k;
-        }
-    }
-
-    ptr[tid] = value0 + value1 + value2 + value3;
-}
-
-__global__ void matmul_fp16_throughput(vec4<float16>* inputs, vec4<float>* outputs, int count)
-{
-    int grid_size = gridDim.x * blockDim.x;
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-    vec4<float16>* ptr = inputs;
-
-    vec4<float16> value0 = ptr[0 * grid_size + tid];
-    vec4<float16> value1 = ptr[1 * grid_size + tid];
-    vec4<float16> value2 = ptr[2 * grid_size + tid];
-    vec4<float16> value3 = ptr[2 * grid_size + tid];
-
-    vec4<float> accum0;
-    vec4<float> accum1;
-    vec4<float> accum2;
-    vec4<float> accum3;
-    for(int i = 0; i < count; i++) {
-        for(int j = 0; j < 64; j++) {
-            // 4 MFMA ops
-            accum0 = __builtin_amdgcn_mfma_f32_16x16x16f16(value0, value0, accum0, 0, 0, 0);
-            accum1 = __builtin_amdgcn_mfma_f32_16x16x16f16(value1, value1, accum1, 0, 0, 0);
-            accum2 = __builtin_amdgcn_mfma_f32_16x16x16f16(value2, value2, accum2, 0, 0, 0);
-            accum3 = __builtin_amdgcn_mfma_f32_16x16x16f16(value3, value3, accum3, 0, 0, 0);
-        }
-    }
-
-    outputs[tid] = accum0 + accum1 + accum2 + accum3;
-}
-
-__global__ void matmul_fp32_throughput(float* inputs, vec4<float>* outputs, int count)
-{
-    int grid_size = gridDim.x * blockDim.x;
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-    float* ptr = inputs;
-
-    float value0 = ptr[0 * grid_size + tid];
-    float value1 = ptr[1 * grid_size + tid];
-    float value2 = ptr[2 * grid_size + tid];
-    float value3 = ptr[2 * grid_size + tid];
-
-    vec4<float> accum0;
-    vec4<float> accum1;
-    vec4<float> accum2;
-    vec4<float> accum3;
-    for(int i = 0; i < count; i++) {
-        for(int j = 0; j < 64; j++) {
-            // 4 MFMA ops
-            accum0 = __builtin_amdgcn_mfma_f32_16x16x4f32(value0, value0, accum0, 0, 0, 0);
-            accum1 = __builtin_amdgcn_mfma_f32_16x16x4f32(value1, value1, accum1, 0, 0, 0);
-            accum2 = __builtin_amdgcn_mfma_f32_16x16x4f32(value2, value2, accum2, 0, 0, 0);
-            accum3 = __builtin_amdgcn_mfma_f32_16x16x4f32(value3, value3, accum3, 0, 0, 0);
-        }
-    }
-
-    outputs[tid] = accum0 + accum1 + accum2 + accum3;
-}
-
-
 // Host code
-
 
 template<typename T> double fma_throughput_test(int count, int runs = 1)
 {
@@ -239,22 +141,23 @@ template<typename matT, typename accumT> double matmul_throughput_test(int count
 
 
 enum : uint32_t {
-    VALU_FP32 = 1 << 0,
-    VALU_FP16 = 1 << 1,
-    VALU_FP64 = 1 << 2,
-    MFMA_FP16 = 1 << 3,
-    MFMA_FP32 = 1 << 4,
-    ALL = (uint32_t)-1
+    VALU_FP32   = 1 << 0,
+    VALU_FP16   = 1 << 1,
+    VALU_FP64   = 1 << 2,
+    MATRIX_FP16 = 1 << 3,
+    MATRIX_FP32 = 1 << 4,
+    ALL         = (uint32_t)-1
 };
 
 struct Result {
-    int device;
-    double valu_fp16;
-    double valu_fp32;
-    double valu_fp64;
-    double mfma_fp16;
-    double mfma_fp32;
+    int device = -1;
+    double valu_fp16 = 0;
+    double valu_fp32 = 0;
+    double valu_fp64 = 0;
+    double mfma_fp16 = 0;
+    double mfma_fp32 = 0;
 
+    // Used for sorting
     bool operator<(const Result& other) {
         return device < other.device;
     }
@@ -262,22 +165,20 @@ struct Result {
 
 void print_result(const Result& res, uint32_t mask)
 {
-    std::cout << std::endl << "GPU " << res.device << std::endl;
-
     if(mask & VALU_FP16) {
-        printf("VALU FP16: %.2f TFLOPS\n", res.valu_fp16 / 1e12);
+        printf("VALU FP16: %8.2f TFLOPS\n", res.valu_fp16 / 1e12);
     }
     if(mask & VALU_FP32) {
-        printf("VALU FP32: %.2f TFLOPS\n", res.valu_fp32 / 1e12);
+        printf("VALU FP32: %8.2f TFLOPS\n", res.valu_fp32 / 1e12);
     }
     if(mask & VALU_FP64) {
-        printf("VALU FP64: %.2f TFLOPS\n", res.valu_fp64 / 1e12);
+        printf("VALU FP64: %8.2f TFLOPS\n", res.valu_fp64 / 1e12);
     }
-    if(mask & MFMA_FP16) {
-        printf("MFMA FP16: %.2f TFLOPS\n", res.mfma_fp16 / 1e12);
+    if(mask & MATRIX_FP16) {
+        printf("MFMA FP16: %8.2f TFLOPS\n", res.mfma_fp16 / 1e12);
     }
-    if(mask & MFMA_FP32) {
-        printf("MFMA FP32: %.2f TFLOPS\n", res.mfma_fp32 / 1e12);
+    if(mask & MATRIX_FP32) {
+        printf("MFMA FP32: %8.2f TFLOPS\n", res.mfma_fp32 / 1e12);
     }
 }
 
@@ -308,15 +209,45 @@ Result run_tests(int device, int runs, uint32_t mask)
         res.valu_fp64 = fma_throughput_test<double>(4096, runs);
     }
 
-    if(mask & MFMA_FP16) {
+    if(mask & MATRIX_FP16) {
         res.mfma_fp16 =matmul_throughput_test<float16, float>(4096, runs);
     }
     
-    if(mask & MFMA_FP32) {
+    if(mask & MATRIX_FP32) {
         res.mfma_fp32 = matmul_throughput_test<float, float>(4096, runs);
     }
 
     return res;
+}
+
+// Use fork() followed by exec() to run child process. For some reason
+// rocprof does not pick up the child processes when only fork() is
+// used.
+pid_t fork_process(int device, int runs, uint32_t mask, int fd)
+{
+    pid_t pid = fork();
+
+    if(pid != 0) {
+        return pid;
+    }
+
+    std::string str_device = std::to_string(device);
+    std::string str_runs = std::to_string(runs);
+    std::string str_mask = std::to_string(mask);
+    std::string str_fd = std::to_string(fd);
+
+    char* const args[] = {
+        (char*)"CHILD",
+        (char*)str_device.c_str(),
+        (char*)str_runs.c_str(),
+        (char*)str_mask.c_str(),
+        (char*)str_fd.c_str(),
+        NULL
+    };
+
+    execv("/proc/self/exe", args);
+    std::cout << "execv() failed: " << std::strerror(errno) << std::endl;
+    exit(1);
 }
 
 void run(std::vector<int>& devices, int runs, uint32_t mask)
@@ -324,6 +255,7 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
     std::vector<pid_t> pids;
     std::vector<Result> results;
 
+    // We will receive results from the child processes using a pipe
     int fd[2];
 
     if(pipe(fd)) {
@@ -333,14 +265,8 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
 
     // Start a new process for each GPU
     for(auto d : devices) {
-        pid_t pid = fork();
-
-        if(pid == 0) {
-            Result res = run_tests(d, runs, mask);
-
-            write(fd[1], &res, sizeof(res));
-            return;
-        }
+        pid_t pid = fork_process(d, runs, mask, fd[1]);
+        
         pids.push_back(pid);
     }
 
@@ -350,16 +276,16 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
         waitpid(pid, &status, 0);
     }
 
-    // Set reads to non-blocking in case one or more child processes
-    // fails and does not write its results to the pipe
+    // Set the read to non-blocking
     int flags = fcntl(fd[0], F_GETFL, 0);
     fcntl(fd[0], F_SETFL, flags | O_NONBLOCK);
 
-    for(auto pid : pids) {
-        Result res;
-        if(read(fd[0], &res, sizeof(res)) > 0) {
-            results.push_back(res);
-        }
+    // Read records from pipe
+    std::vector<Result> tmp(pids.size());
+    int count = read(fd[0], tmp.data(), tmp.size() * sizeof(Result)) / sizeof(Result);
+ 
+    for(int i = 0; i < count; i++) {
+        results.push_back(tmp[i]);
     }
 
     // Sort results by GPU id
@@ -367,17 +293,46 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
  
     // Print results
     for(auto r : results) {
+        std::cout << std::endl << "GPU " << r.device << std::endl;
         print_result(r, mask);
     }
+
+    Result total;
+    for(auto r : results) {
+        total.valu_fp16 += r.valu_fp16;
+        total.valu_fp32 += r.valu_fp32;
+        total.valu_fp64 += r.valu_fp64;
+        total.mfma_fp16 += r.mfma_fp16;
+        total.mfma_fp32 += r.mfma_fp32;
+    }
+    std::cout << std::endl << "System total" << std::endl;
+    print_result(total, mask);
 }
+
+
 
 int main(int argc, char** argv)
 {
+    if(std::string(argv[0]) == "CHILD") {
+        int device = atoi(argv[1]);
+        int runs = atoi(argv[2]);
+        uint32_t mask = atoi(argv[3]);
+        int fd = atoi(argv[4]);
+
+        Result res = run_tests(device, runs, mask);
+
+        write(fd, &res, sizeof(res));
+        return 0; 
+    }
+
     int runs = 1;
 
     uint32_t mask = 0;
     std::vector<int> devices;
+    int device_count;
     int device = 0;
+
+    HIP_CALL(hipGetDeviceCount(&device_count));
 
     int i = 1;
     while(i < argc) {
@@ -388,6 +343,7 @@ int main(int argc, char** argv)
             // Skip next 
             i++;
         } else if(arg == "--devices") {
+            // Parse comma-separated string of numbers
             std::string s(argv[i + 1]);
             std::stringstream ss(s);
             std::string r;
@@ -408,15 +364,23 @@ int main(int argc, char** argv)
         } else if(arg == "--fp16") {
             mask |= VALU_FP16;
         } else if(arg == "--matfp16") {
-            mask |= MFMA_FP16;
+            mask |= MATRIX_FP16;
         } else if(arg == "--matfp32") {
-            mask |= MFMA_FP32;
+            mask |= MATRIX_FP32;
         } else {
             std::cout << "Invalid argument " << arg << std::endl;
             return 1;
         }
 
         i++;
+    }
+
+    // Verify device ID's
+    for(auto d : devices) {
+        if(d >= device_count) {
+            std::cout << "Invalid device ordinal: " << d << std::endl;
+            return 1;
+        }
     }
 
     if(devices.size() == 0) {
