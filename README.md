@@ -1,2 +1,2 @@
-# rocbench
-ROCm Microbench
+# rocflop
+ROCm FLOPs microbench
