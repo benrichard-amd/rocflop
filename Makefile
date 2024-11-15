@@ -1,4 +1,4 @@
-HIPCCFLAGS=--save-temps -O2
+HIPCCFLAGS=
 all:
 
-	hipcc $(HIPCCFLAGS) main.cpp -o rocbench
+	hipcc $(HIPCCFLAGS) main.cpp -o rocflop

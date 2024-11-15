@@ -18,6 +18,15 @@ void HIP_CALL(hipError_t err)
     }
 }
 
+enum : uint32_t {
+    VALU_FP32   = 1 << 0,
+    VALU_FP16   = 1 << 1,
+    VALU_FP64   = 1 << 2,
+    MATRIX_FP16 = 1 << 3,
+    MATRIX_FP32 = 1 << 4,
+    ALL         = (uint32_t)-1
+};
+
 // Timer for measuring kernel duration
 class HIPTimer {
 
@@ -139,16 +148,6 @@ template<typename matT, typename accumT> double matmul_throughput_test(int count
     return flops;
 }
 
-
-enum : uint32_t {
-    VALU_FP32   = 1 << 0,
-    VALU_FP16   = 1 << 1,
-    VALU_FP64   = 1 << 2,
-    MATRIX_FP16 = 1 << 3,
-    MATRIX_FP32 = 1 << 4,
-    ALL         = (uint32_t)-1
-};
-
 struct Result {
     int device = -1;
     double valu_fp16 = 0;
@@ -253,7 +252,6 @@ pid_t fork_process(int device, int runs, uint32_t mask, int fd)
 void run(std::vector<int>& devices, int runs, uint32_t mask)
 {
     std::vector<pid_t> pids;
-    std::vector<Result> results;
 
     // We will receive results from the child processes using a pipe
     int fd[2];
@@ -281,12 +279,10 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
     fcntl(fd[0], F_SETFL, flags | O_NONBLOCK);
 
     // Read records from pipe
-    std::vector<Result> tmp(pids.size());
-    int count = read(fd[0], tmp.data(), tmp.size() * sizeof(Result)) / sizeof(Result);
- 
-    for(int i = 0; i < count; i++) {
-        results.push_back(tmp[i]);
-    }
+    std::vector<Result> results(pids.size());
+    int count = read(fd[0], results.data(), results.size() * sizeof(Result)) / sizeof(Result);
+
+    results.resize(count);
 
     // Sort results by GPU id
     std::sort(results.begin(), results.end());
@@ -322,7 +318,7 @@ int main(int argc, char** argv)
         Result res = run_tests(device, runs, mask);
 
         write(fd, &res, sizeof(res));
-        return 0; 
+        return 0;
     }
 
     int runs = 1;
