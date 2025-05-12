@@ -309,7 +309,8 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
 void usage()
 {
     std::cout << "--device  ID          Use device with the given numerical ID" << std::endl;
-    std::cout << "--devices IDS         Comma-separated list of device Ids (e.g., 1,2,3)" << std::endl;
+    std::cout << "--devices IDS | ALL   Comma-separated list of device Ids (e.g., 1,2,3)" << std::endl;
+    std::cout << "                      ALL for all devices" << std::endl;                                  
     std::cout << "--runs    RUNS        Number of times each kernel is dispatched" << std::endl;
 
     std::cout << "--fp16                Run FP16 (VALU) test" << std::endl;
@@ -336,6 +337,7 @@ int main(int argc, char** argv)
     int runs = 1;
 
     uint32_t mask = 0;
+    bool all_devices = false;
     std::vector<int> devices;
     int device_count;
     int device = 0;
@@ -356,10 +358,15 @@ int main(int argc, char** argv)
         } else if(arg == "--devices") {
             // Parse comma-separated string of numbers
             std::string s(argv[i + 1]);
-            std::stringstream ss(s);
-            std::string r;
-            while(getline(ss, r, ',')) {
-                devices.push_back(std::stoi(r));
+
+            if(s == "all" || s == "ALL") {
+                all_devices = true;
+            } else {
+                std::stringstream ss(s);
+                std::string r;
+                while(getline(ss, r, ',')) {
+                    devices.push_back(std::stoi(r));
+                }
             }
             // Skip next 
             i++;
@@ -386,6 +393,12 @@ int main(int argc, char** argv)
         }
 
         i++;
+    }
+
+    if(all_devices) {
+        for(int i = 0; i < device_count; i++ ){
+            devices.push_back(i);
+        }
     }
 
     // Verify device ID's
