@@ -306,6 +306,18 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
 }
 
 
+void usage()
+{
+    std::cout << "--device  ID          Use device with the given numerical ID" << std::endl;
+    std::cout << "--devices IDS         Comma-separated list of device Ids (e.g., 1,2,3)" << std::endl;
+    std::cout << "--runs    RUNS        Number of times each kernel is dispatched" << std::endl;
+
+    std::cout << "--fp16                Run FP16 (VALU) test" << std::endl;
+    std::cout << "--fp32                Run FP32 (VALU) test" << std::endl;
+    std::cout << "--fp64                Run FP64 (VALU) test" << std::endl;
+    std::cout << "--matfp16             Run FP16 (MFMA) test" << std::endl;
+    std::cout << "--matfp32             Run FP32 (MFMA) test" << std::endl;
+}
 
 int main(int argc, char** argv)
 {
@@ -334,7 +346,10 @@ int main(int argc, char** argv)
     while(i < argc) {
         std::string arg = std::string(argv[i]);
 
-        if(arg == "--device") {
+        if(arg == "--help") {
+            usage();
+            return 0;
+        } else if(arg == "--device") {
             devices.push_back(atoi(argv[i + 1]));
             // Skip next 
             i++;
@@ -364,7 +379,9 @@ int main(int argc, char** argv)
         } else if(arg == "--matfp32") {
             mask |= MATRIX_FP32;
         } else {
-            std::cout << "Invalid argument " << arg << std::endl;
+            std::cout << "Invalid argument '" << arg << "'" << std::endl;
+            std::cout << std::endl;
+            usage();
             return 1;
         }
 
