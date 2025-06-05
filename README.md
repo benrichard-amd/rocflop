@@ -16,4 +16,5 @@ Run `make`
 --fp64                Run FP64 (VALU) test
 --matfp16             Run FP16 (MFMA) test
 --matfp32             Run FP32 (MFMA) test
+--smatfp16            Run FP16 (SMFMAC) test
 ```
