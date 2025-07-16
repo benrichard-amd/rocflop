@@ -18,6 +18,34 @@ void HIP_CALL(hipError_t err)
     }
 }
 
+struct GCNArch {
+    int major;
+    int minor;
+    int rev;
+};
+
+GCNArch get_gcn_arch(int device)
+{
+    hipDeviceProp_t props;
+
+    HIP_CALL(hipGetDeviceProperties(&props, device));
+
+    // Example: gfx908:sramecc+:xnack-
+    std::string arch_full(props.gcnArchName);
+
+    // Extract number e.g. "908" 
+    std::string gfx_str = arch_full.substr(3, arch_full.find_first_of(':'));
+
+    int gfx_num = std::stoi(gfx_str, nullptr, 16);
+
+    GCNArch arch;
+    arch.major = (gfx_num & 0xff00) >> 8;
+    arch.minor = (gfx_num & 0x00f0) >> 4;
+    arch.rev   = (gfx_num & 0x000f);
+
+    return arch;
+}
+
 enum : uint32_t {
     VALU_FP32   = 1 << 0,
     VALU_FP16   = 1 << 1,
@@ -63,12 +91,12 @@ public:
 
 // Host code
 
-template<typename T> double fma_throughput_test(int count, int runs = 1)
+template<typename T> double fma_throughput_test(int device, int count, int runs = 1)
 {
     vec4<T>* buffer = nullptr;
 
     hipDeviceProp_t props;
-    HIP_CALL(hipGetDeviceProperties(&props, 0));
+    HIP_CALL(hipGetDeviceProperties(&props, device));
     
     int blocks = props.multiProcessorCount * 512;
     int threads_per_block = 64;
@@ -93,7 +121,7 @@ template<typename T> double fma_throughput_test(int count, int runs = 1)
     return flops;
 }
 
-template<typename matT, typename accumT> double matmul_throughput_test(int count, int runs = 1)
+template<typename matT, typename accumT> double matmul_throughput_test(int device, int count, int runs = 1)
 {
     const int wave_size = 64;
     int k;
@@ -118,7 +146,7 @@ template<typename matT, typename accumT> double matmul_throughput_test(int count
     void* accum = nullptr;
 
     hipDeviceProp_t props;
-    HIP_CALL(hipGetDeviceProperties(&props, 0));
+    HIP_CALL(hipGetDeviceProperties(&props, device));
 
     int blocks = props.multiProcessorCount * 512;
     int threads_per_block = wave_size;
@@ -149,7 +177,7 @@ template<typename matT, typename accumT> double matmul_throughput_test(int count
     return flops;
 }
 
-template<typename matT, typename accumT> double sparse_matmul_throughput_test(int count, int runs = 1)
+template<typename matT, typename accumT> double sparse_matmul_throughput_test(int device, int count, int runs = 1)
 {
     const int wave_size = 64;
     int k;
@@ -171,7 +199,7 @@ template<typename matT, typename accumT> double sparse_matmul_throughput_test(in
     void* accum = nullptr;
 
     hipDeviceProp_t props;
-    HIP_CALL(hipGetDeviceProperties(&props, 0));
+    HIP_CALL(hipGetDeviceProperties(&props, device));
 
     int blocks = props.multiProcessorCount * 512;
     int threads_per_block = wave_size;
@@ -253,31 +281,44 @@ Result run_tests(int device, int runs, uint32_t mask)
     }
 
     HIP_CALL(hipSetDevice(device));
+    GCNArch arch = get_gcn_arch(device);
 
     Result res = {.device = device};
 
     if(mask & VALU_FP16) {
-        res.valu_fp16 = fma_throughput_test<float16>(4096, runs);
+        res.valu_fp16 = fma_throughput_test<float16>(device, 4096, runs);
     }
 
     if(mask & VALU_FP32) {
-        res.valu_fp32 = fma_throughput_test<float>(4096, runs);
+        res.valu_fp32 = fma_throughput_test<float>(device, 4096, runs);
     }
 
     if(mask & VALU_FP64) {
-        res.valu_fp64 = fma_throughput_test<double>(4096, runs);
+        res.valu_fp64 = fma_throughput_test<double>(device, 4096, runs);
     }
 
     if(mask & MATRIX_FP16) {
-        res.mfma_fp16 = matmul_throughput_test<float16, float>(4096, runs);
+        if(arch.major == 0x9 && (arch.minor >= 0x4 || (arch.minor == 0 && arch.rev >= 8))) {
+            res.mfma_fp16 = matmul_throughput_test<float16, float>(device, 4096, runs);
+        } else {
+            res.mfma_fp16 = 0;
+        }
     }
     
     if(mask & MATRIX_FP32) {
-        res.mfma_fp32 = matmul_throughput_test<float, float>(4096, runs);
+        if(arch.major == 0x9 && (arch.minor >= 0x4 || (arch.minor == 0 && arch.rev >= 8))) {
+            res.mfma_fp32 = matmul_throughput_test<float, float>(device, 4096, runs);
+        } else {
+            res.mfma_fp32 = 0;
+        }
     }
 
     if(mask & SMATRIX_FP16) {
-        res.smfmac_fp16 = sparse_matmul_throughput_test<float16, float>(4096, runs);
+        if(arch.major == 9 && arch.minor >= 4) {
+            res.smfmac_fp16 = sparse_matmul_throughput_test<float16, float>(device, 4096, runs);
+        } else {
+            res.smfmac_fp16 = 0;
+        }
     }
     return res;
 }
