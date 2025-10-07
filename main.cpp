@@ -498,6 +498,8 @@ int main(int argc, char** argv)
             mask |= VALU_FP64;
         } else if(arg == "--fp16") {
             mask |= VALU_FP16;
+        } else if(arg == "--int32") {
+            mask |= VALU_INT32;
         } else if(arg == "--matfp16") {
             mask |= MATRIX_FP16;
         } else if(arg == "--matfp32") {
