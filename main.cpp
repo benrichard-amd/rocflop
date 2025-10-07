@@ -53,6 +53,8 @@ enum : uint32_t {
     MATRIX_FP16 = 1 << 3,
     MATRIX_FP32 = 1 << 4,
     SMATRIX_FP16 = 1 << 5,
+    VALU_INT32  = 1 << 6,
+
     ALL         = (uint32_t)-1
 };
 
@@ -236,6 +238,7 @@ struct Result {
     double valu_fp16 = 0;
     double valu_fp32 = 0;
     double valu_fp64 = 0;
+    double valu_int32 = 0;
     double mfma_fp16 = 0;
     double mfma_fp32 = 0;
     double smfmac_fp16 = 0;
@@ -256,6 +259,9 @@ void print_result(const Result& res, uint32_t mask)
     }
     if(mask & VALU_FP64) {
         printf("VALU FP64: %8.2f TFLOPS\n", res.valu_fp64 / 1e12);
+    }
+    if(mask & VALU_INT32) {
+        printf("VALU INT32: %8.2f TIOPS\n", res.valu_int32 / 1e12);
     }
     if(mask & MATRIX_FP16) {
         printf("MFMA FP16: %8.2f TFLOPS\n", res.mfma_fp16 / 1e12);
@@ -295,6 +301,10 @@ Result run_tests(int device, int runs, uint32_t mask)
 
     if(mask & VALU_FP64) {
         res.valu_fp64 = fma_throughput_test<double>(device, 4096, runs);
+    }
+
+    if(mask & VALU_INT32) {
+        res.valu_int32 = fma_throughput_test<int>(device, 4096, runs);
     }
 
     if(mask & MATRIX_FP16) {
@@ -402,6 +412,7 @@ void run(std::vector<int>& devices, int runs, uint32_t mask)
         total.valu_fp16 += r.valu_fp16;
         total.valu_fp32 += r.valu_fp32;
         total.valu_fp64 += r.valu_fp64;
+        total.valu_int32 += r.valu_int32;
         total.mfma_fp16 += r.mfma_fp16;
         total.mfma_fp32 += r.mfma_fp32;
         total.smfmac_fp16 += r.smfmac_fp16;
